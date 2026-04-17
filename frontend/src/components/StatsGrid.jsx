@@ -4,7 +4,7 @@ import {
   AlertTriangle,
   Heart,
   TrendingUp,
-  Zap,
+  Brain,
   BarChart2,
 } from 'lucide-react';
 
@@ -112,17 +112,10 @@ function StatCard({ icon: Icon, label, value, sub, accentColor, delay, isAnomaly
 /* ── Quality color helper ── */
 function qualityConfig(pct) {
   if (pct === 0) return { label: 'Excellent', color: '#2ed573' };
-  if (pct < 2)  return { label: 'Good',      color: '#00d4aa' };
-  if (pct < 8)  return { label: 'Moderate',  color: '#ffa502' };
+  if (pct < 15) return { label: 'Good',      color: '#00d4aa' };
+  if (pct < 40) return { label: 'Moderate',  color: '#ffa502' };
   return          { label: 'Poor',      color: '#ff4757' };
 }
-
-/* ── Method display ── */
-const METHOD_LABELS = {
-  zscore: 'Z-Score',
-  iqr: 'IQR Global',
-  gradient: 'Gradient Spike',
-};
 
 /* ── StatsGrid ── */
 export default function StatsGrid({ stats, status }) {
@@ -160,10 +153,10 @@ export default function StatsGrid({ stats, status }) {
       accentColor: '#3d7fff',
     },
     {
-      icon: Zap,
-      label: 'Detection Method',
-      value: METHOD_LABELS[stats.method] || stats.method.toUpperCase(),
-      sub: 'active algorithm',
+      icon: Brain,
+      label: 'Detection Model',
+      value: 'Autoencoder',
+      sub: 'Dense · MAE · ECG5000',
       accentColor: '#ffa502',
     },
     {

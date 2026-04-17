@@ -78,9 +78,8 @@ export default function App() {
   /* ── State ── */
   const [theme, setTheme] = useState('dark');
   const [apiOnline, setApiOnline] = useState(null);
+  const [modelThreshold, setModelThreshold] = useState(null);
   const [settingsOpen, setSettingsOpen] = useState(false);
-  const [method, setMethod] = useState('zscore');
-  const [threshold, setThreshold] = useState(2.8);
   const [loading, setLoading] = useState(false);
   const [results, setResults] = useState(null);
   const [error, setError] = useState(null);
@@ -91,44 +90,42 @@ export default function App() {
     document.documentElement.setAttribute('data-theme', theme);
   }, [theme]);
 
-  /* ── Health check ── */
+  /* ── Health check + fetch model threshold ── */
   useEffect(() => {
     axios
       .get('/api/health')
-      .then(() => setApiOnline(true))
+      .then((res) => {
+        setApiOnline(true);
+        if (res.data?.threshold != null) setModelThreshold(res.data.threshold);
+      })
       .catch(() => setApiOnline(false));
   }, []);
 
   /* ── Analyze via API ── */
-  const analyze = useCallback(
-    async (file) => {
-      setError(null);
-      setLoading(true);
-      setResults(null);
-      fileRef.current = file;
+  const analyze = useCallback(async (file) => {
+    setError(null);
+    setLoading(true);
+    setResults(null);
+    fileRef.current = file;
 
-      try {
-        const form = new FormData();
-        form.append('file', file);
-        const { data } = await axios.post(
-          `/api/analyze?threshold=${threshold}&method=${method}`,
-          form,
-          { headers: { 'Content-Type': 'multipart/form-data' } }
-        );
-        setResults(data);
-      } catch (err) {
-        const msg =
-          err.response?.data?.detail ||
-          (err.code === 'ERR_NETWORK'
-            ? 'Cannot reach the API. Ensure the backend is running on port 8000.'
-            : err.message || 'An unexpected error occurred.');
-        setError(msg);
-      } finally {
-        setLoading(false);
-      }
-    },
-    [method, threshold]
-  );
+    try {
+      const form = new FormData();
+      form.append('file', file);
+      const { data } = await axios.post('/api/analyze', form, {
+        headers: { 'Content-Type': 'multipart/form-data' },
+      });
+      setResults(data);
+    } catch (err) {
+      const msg =
+        err.response?.data?.detail ||
+        (err.code === 'ERR_NETWORK'
+          ? 'Cannot reach the API. Ensure the backend is running on port 8000.'
+          : err.message || 'An unexpected error occurred.');
+      setError(msg);
+    } finally {
+      setLoading(false);
+    }
+  }, []);
 
   /* ── Load synthetic sample ── */
   const loadSample = useCallback(async () => {
@@ -168,6 +165,7 @@ export default function App() {
   };
 
   /* ── Anomaly table rows ── */
+  const WINDOW_SIZE = 140;
   const tableRows = results
     ? results.anomaly_indices.slice(0, 50).map((idx) => {
         const value = results.signal[idx];
@@ -175,7 +173,9 @@ export default function App() {
         const signalStd = results.stats.std;
         const deviation = signalStd > 0 ? (value - signalMean) / signalStd : 0;
         const sev = getSeverity(deviation);
-        return { idx, value, deviation, sev };
+        const windowNum = Math.floor(idx / WINDOW_SIZE) + 1;
+        const windowPos = (idx % WINDOW_SIZE) + 1;
+        return { idx, value, deviation, sev, windowNum, windowPos };
       })
     : [];
 
@@ -259,10 +259,7 @@ export default function App() {
       <SettingsPanel
         open={settingsOpen}
         onClose={() => setSettingsOpen(false)}
-        method={method}
-        setMethod={setMethod}
-        threshold={threshold}
-        setThreshold={setThreshold}
+        modelThreshold={modelThreshold}
       />
 
       {/* ═══════════════════════ MAIN ═══════════════════════ */}
@@ -317,13 +314,8 @@ export default function App() {
             <p className="loading-sub">
               Running{' '}
               <strong style={{ color: 'var(--accent)' }}>
-                {method === 'zscore'
-                  ? 'Z-Score'
-                  : method === 'iqr'
-                  ? 'IQR'
-                  : 'Gradient Spike'}
-              </strong>{' '}
-              anomaly detection
+                autoencoder reconstruction analysis
+              </strong>
             </p>
 
             <div className="skeleton-grid">
@@ -427,6 +419,8 @@ export default function App() {
                       <tr>
                         <th>#</th>
                         <th>Sample Index</th>
+                        <th>Window</th>
+                        <th>Window Pos</th>
                         <th>Amplitude (mV)</th>
                         <th>Deviation (σ)</th>
                         <th>Severity</th>
@@ -437,8 +431,10 @@ export default function App() {
                         <tr key={row.idx}>
                           <td style={{ color: 'var(--faint)' }}>{i + 1}</td>
                           <td>{row.idx}</td>
+                          <td style={{ color: 'var(--muted)' }}>#{row.windowNum}</td>
+                          <td style={{ color: 'var(--faint)' }}>{row.windowPos}/140</td>
                           <td className="anomaly-amplitude">
-                            {row.value.toFixed(4)}
+                            {row.value != null ? row.value.toFixed(4) : 'N/A'}
                           </td>
                           <td
                             style={{

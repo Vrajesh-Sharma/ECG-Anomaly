@@ -1,12 +1,15 @@
+# main.py
 from fastapi import FastAPI, File, UploadFile, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 import pandas as pd
 import numpy as np
-import io
-from typing import Optional
+import tensorflow as tf
+from tensorflow.keras import layers
+from tensorflow.keras.models import Model
+import io, json, os
 
-app = FastAPI(title="ECG Anomaly Detection API", version="1.0.0")
+app = FastAPI(title="ECG Anomaly Detection API", version="2.0.0")
 
 app.add_middleware(
     CORSMiddleware,
@@ -16,208 +19,202 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# ── Model Definition (must match Kaggle notebook exactly) ────────────
+class AnomalyDetector(Model):
+    def __init__(self):
+        super(AnomalyDetector, self).__init__()
+        self.encoder = tf.keras.Sequential([
+            layers.Dense(32, activation="relu"),
+            layers.Dense(16, activation="relu"),
+            layers.Dense(8,  activation="relu")
+        ])
+        self.decoder = tf.keras.Sequential([
+            layers.Dense(16, activation="relu"),
+            layers.Dense(32, activation="relu"),
+            layers.Dense(140, activation="sigmoid")
+        ])
 
-def detect_anomalies_zscore(signal: np.ndarray, window: int = 50, threshold: float = 2.8) -> np.ndarray:
-    """Z-score based anomaly detection with rolling window."""
-    anomaly_flags = np.zeros(len(signal), dtype=bool)
-    for i in range(len(signal)):
-        start = max(0, i - window)
-        end = min(len(signal), i + window)
-        local = signal[start:end]
-        mean = np.mean(local)
-        std = np.std(local)
-        if std > 0:
-            z = abs((signal[i] - mean) / std)
-            if z > threshold:
-                anomaly_flags[i] = True
-    return anomaly_flags
+    def call(self, x):
+        encoded = self.encoder(x)
+        decoded = self.decoder(encoded)
+        return decoded
 
+# ── Paths (all files sit directly in backend/) ───────────────────────
+BASE_DIR     = os.path.dirname(os.path.abspath(__file__))
+WEIGHTS_PATH = os.path.join(BASE_DIR, "autoencoder.weights.h5")
+META_PATH    = os.path.join(BASE_DIR, "meta.json")
 
-def detect_anomalies_iqr(signal: np.ndarray) -> np.ndarray:
-    """IQR-based global anomaly detection."""
-    q1 = np.percentile(signal, 25)
-    q3 = np.percentile(signal, 75)
-    iqr = q3 - q1
-    lower = q1 - 1.5 * iqr
-    upper = q3 + 1.5 * iqr
-    return (signal < lower) | (signal > upper)
+if not os.path.exists(WEIGHTS_PATH):
+    raise RuntimeError(f"❌ Weights not found at: {WEIGHTS_PATH}")
+if not os.path.exists(META_PATH):
+    raise RuntimeError(f"❌ meta.json not found at: {META_PATH}")
 
+# ── Load meta ────────────────────────────────────────────────────────
+with open(META_PATH) as f:
+    meta = json.load(f)
 
-def detect_anomalies_gradient(signal: np.ndarray, threshold_multiplier: float = 4.0) -> np.ndarray:
-    """Gradient spike detection for sudden changes."""
-    grad = np.abs(np.gradient(signal))
-    threshold = np.mean(grad) + threshold_multiplier * np.std(grad)
-    return grad > threshold
+THRESHOLD   = meta["threshold"]
+MIN_VAL     = meta["min_val"]
+MAX_VAL     = meta["max_val"]
+WINDOW_SIZE = meta["window_size"]  # 140
 
+# ── Load weights ─────────────────────────────────────────────────────
+autoencoder = AnomalyDetector()
+autoencoder(tf.zeros((1, WINDOW_SIZE)))   # build graph first
+autoencoder.load_weights(WEIGHTS_PATH)
+print(f"✅ Model loaded | Threshold = {THRESHOLD:.6f}")
 
-def compute_heart_rate(signal: np.ndarray, sampling_rate: float = 360.0) -> dict:
-    """Estimate heart rate from R-peaks."""
-    from scipy.signal import find_peaks
-    peaks, _ = find_peaks(signal, distance=int(sampling_rate * 0.4), height=np.mean(signal) + 0.3 * np.std(signal))
-    if len(peaks) < 2:
-        return {"bpm": None, "rr_intervals": [], "peak_indices": peaks.tolist()}
-    rr_intervals = np.diff(peaks) / sampling_rate * 1000  # ms
-    bpm = 60000 / np.mean(rr_intervals)
-    return {
-        "bpm": round(float(bpm), 1),
-        "rr_intervals": rr_intervals.tolist(),
-        "peak_indices": peaks.tolist()
-    }
+# ── Helpers ──────────────────────────────────────────────────────────
+def normalize_signal(signal: np.ndarray) -> np.ndarray:
+    return (signal - MIN_VAL) / (MAX_VAL - MIN_VAL)
 
+def segment_signal(signal: np.ndarray):
+    segments, starts = [], []
+    for s in range(0, len(signal) - WINDOW_SIZE + 1, WINDOW_SIZE):
+        segments.append(signal[s : s + WINDOW_SIZE])
+        starts.append(s)
+    return np.array(segments, dtype=np.float32), starts
 
+def compute_heart_rate(signal: np.ndarray, fs: float = 360.0):
+    try:
+        from scipy.signal import find_peaks
+        peaks, _ = find_peaks(
+            signal,
+            distance=int(fs * 0.4),
+            height=float(np.mean(signal) + 0.3 * np.std(signal))
+        )
+        if len(peaks) < 2:
+            return None, None
+        bpm = round(float(60000 / np.mean(np.diff(peaks) / fs * 1000)), 1)
+        return bpm, int(len(peaks))
+    except Exception:
+        return None, None
+
+# ── Routes ───────────────────────────────────────────────────────────
 @app.get("/")
 def root():
-    return {"message": "ECG Anomaly Detection API", "status": "running"}
-
+    return {"message": "ECG Autoencoder API", "status": "running"}
 
 @app.get("/health")
 def health():
-    return {"status": "healthy"}
-
+    return {
+        "status":    "healthy",
+        "threshold": round(THRESHOLD, 6),
+        "window":    WINDOW_SIZE,
+        "model":     "Dense Autoencoder (ECG5000)"
+    }
 
 @app.post("/analyze")
 async def analyze_ecg(
     file: UploadFile = File(...),
-    threshold: float = 2.8,
-    method: str = "zscore"
+    threshold: float = None
 ):
-    if not file.filename.endswith(".csv"):
-        raise HTTPException(status_code=400, detail="Only CSV files are supported.")
+    if not file.filename.lower().endswith(".csv"):
+        raise HTTPException(400, "Only .csv files are supported.")
 
     content = await file.read()
     try:
         df = pd.read_csv(io.StringIO(content.decode("utf-8")))
     except Exception as e:
-        raise HTTPException(status_code=400, detail=f"Failed to parse CSV: {str(e)}")
+        raise HTTPException(400, f"Failed to parse CSV: {e}")
 
-    # Detect signal column
     numeric_cols = df.select_dtypes(include=[np.number]).columns.tolist()
     if not numeric_cols:
-        raise HTTPException(status_code=400, detail="No numeric columns found in CSV.")
+        raise HTTPException(400, "No numeric columns found in CSV.")
 
-    # Use first numeric column as signal, or one named 'ecg'/'signal'/'value'
+    PREFERRED  = ["ecg", "signal", "amplitude", "mv", "value"]
     signal_col = next(
-        (c for c in numeric_cols if c.lower() in ["ecg", "signal", "value", "amplitude", "mv"]),
+        (c for c in numeric_cols if c.lower() in PREFERRED),
         numeric_cols[0]
     )
 
-    # Use second column as time if exists, else generate
-    time_col = None
-    if len(numeric_cols) > 1:
-        time_col = next(
-            (c for c in numeric_cols if c.lower() in ["time", "t", "timestamp", "sample"]),
-            None
-        )
+    signal = df[signal_col].dropna().values.astype(np.float64)
+    if len(signal) < WINDOW_SIZE:
+        raise HTTPException(400, f"Signal too short — need ≥{WINDOW_SIZE} samples.")
 
-    signal = df[signal_col].dropna().values
-    if len(signal) < 10:
-        raise HTTPException(status_code=400, detail="Signal too short (< 10 samples).")
+    # Normalize + segment
+    norm_signal          = normalize_signal(signal).astype(np.float32)
+    segments, seg_starts = segment_signal(norm_signal)
 
-    # Limit to 5000 points for performance
+    # Reconstruct via autoencoder
+    thr    = threshold if threshold is not None else THRESHOLD
+    recons = autoencoder(tf.cast(segments, tf.float32)).numpy()
+    losses = np.mean(np.abs(recons - segments), axis=1)
+    is_anom = losses > thr
+
+    # Map anomalous windows → peak-error sample index
+    anomaly_indices = []
+    for i, (start, anom) in enumerate(zip(seg_starts, is_anom)):
+        if anom:
+            peak = int(np.argmax(np.abs(recons[i] - segments[i])))
+            anomaly_indices.append(start + peak)
+
+    # Downsample display signal to ≤5000 pts
+    display_signal = signal
     if len(signal) > 5000:
-        step = len(signal) // 5000
-        signal = signal[::step]
+        display_signal = signal[:: len(signal) // 5000]
 
-    n = len(signal)
-    time = np.arange(n).tolist()
+    bpm, r_peaks     = compute_heart_rate(signal)
+    num_windows      = len(seg_starts)
+    anom_windows     = int(np.sum(is_anom))
+    pct              = round(anom_windows / max(num_windows, 1) * 100, 2)
 
-    # Anomaly detection
-    if method == "iqr":
-        flags = detect_anomalies_iqr(signal)
-    elif method == "gradient":
-        flags = detect_anomalies_gradient(signal)
-    else:
-        flags = detect_anomalies_zscore(signal, threshold=threshold)
-
-    anomaly_indices = np.where(flags)[0].tolist()
-
-    # Stats
-    stats = {
-        "total_samples": int(n),
-        "anomaly_count": int(np.sum(flags)),
-        "anomaly_pct": round(float(np.mean(flags) * 100), 2),
-        "mean": round(float(np.mean(signal)), 4),
-        "std": round(float(np.std(signal)), 4),
-        "min": round(float(np.min(signal)), 4),
-        "max": round(float(np.max(signal)), 4),
-        "signal_col": signal_col,
-        "method": method,
-    }
-
-    # Heart rate estimate (try)
-    try:
-        from scipy.signal import find_peaks
-        hr = compute_heart_rate(signal)
-        stats["heart_rate_bpm"] = hr["bpm"]
-        stats["r_peak_count"] = len(hr["peak_indices"])
-    except Exception:
-        stats["heart_rate_bpm"] = None
-        stats["r_peak_count"] = None
-
-    # Status classification
-    pct = stats["anomaly_pct"]
-    if pct == 0:
-        status = "normal"
-        status_label = "Normal Sinus Rhythm"
-    elif pct < 2:
-        status = "mild"
-        status_label = "Mild Irregularities Detected"
-    elif pct < 8:
-        status = "moderate"
-        status_label = "Moderate Anomalies Detected"
-    else:
-        status = "critical"
-        status_label = "Critical — High Anomaly Rate"
+    if pct == 0:       status, label = "normal",   "Normal Sinus Rhythm"
+    elif pct < 15:     status, label = "mild",     "Mild Irregularities Detected"
+    elif pct < 40:     status, label = "moderate", "Moderate Anomalies Detected"
+    else:              status, label = "critical", "Critical — High Anomaly Rate"
 
     return JSONResponse({
-        "signal": signal.tolist(),
-        "time": time,
+        "signal":          display_signal.tolist(),
+        "time":            list(range(len(display_signal))),
         "anomaly_indices": anomaly_indices,
-        "stats": stats,
-        "status": status,
-        "status_label": status_label,
-        "filename": file.filename,
+        "stats": {
+            "total_samples":    int(len(signal)),
+            "anomaly_count":    len(anomaly_indices),
+            "anomaly_pct":      pct,
+            "mean":             round(float(np.mean(signal)), 4),
+            "std":              round(float(np.std(signal)),  4),
+            "min":              round(float(np.min(signal)),  4),
+            "max":              round(float(np.max(signal)),  4),
+            "signal_col":       signal_col,
+            "method":           "Dense Autoencoder",
+            "heart_rate_bpm":   bpm,
+            "r_peak_count":     r_peaks,
+            "threshold_used":   round(thr, 6),
+            "windows_analyzed": num_windows,
+            "anomaly_windows":  anom_windows,
+            "window_size":      WINDOW_SIZE,
+        },
+        "status":       status,
+        "status_label": label,
+        "filename":     file.filename,
     })
-
 
 @app.post("/generate-sample")
 def generate_sample(
-    duration: int = 10,
-    sampling_rate: int = 360,
-    anomaly_rate: float = 0.03
+    duration: int       = 10,
+    sampling_rate: int  = 360,
+    anomaly_rate: float = 0.025
 ):
-    """Generate a synthetic ECG-like signal with injected anomalies."""
-    n = duration * sampling_rate
-    t = np.linspace(0, duration, n)
-
-    # Simulate a basic ECG waveform
+    n      = duration * sampling_rate
+    t      = np.linspace(0, duration, n)
     signal = np.zeros(n)
-    heart_rate = 75  # bpm
-    period = sampling_rate * 60 / heart_rate
+    period = sampling_rate * 60 / 75
 
     for i in range(n):
         phase = (i % period) / period
-        # P wave
-        signal[i] += 0.1 * np.exp(-((phase - 0.15) ** 2) / (2 * 0.003))
-        # QRS complex
-        signal[i] += 1.0 * np.exp(-((phase - 0.3) ** 2) / (2 * 0.001))
-        signal[i] -= 0.3 * np.exp(-((phase - 0.26) ** 2) / (2 * 0.001))
-        signal[i] -= 0.2 * np.exp(-((phase - 0.34) ** 2) / (2 * 0.001))
-        # T wave
-        signal[i] += 0.3 * np.exp(-((phase - 0.55) ** 2) / (2 * 0.008))
+        signal[i] += 1.0 * np.exp(-((phase - 0.30)**2) / 0.002)
+        signal[i] -= 0.3 * np.exp(-((phase - 0.26)**2) / 0.002)
+        signal[i] -= 0.2 * np.exp(-((phase - 0.34)**2) / 0.002)
+        signal[i] += 0.3 * np.exp(-((phase - 0.55)**2) / 0.016)
 
     signal += np.random.normal(0, 0.02, n)
-
-    # Inject anomalies
-    num_anomalies = int(n * anomaly_rate)
-    anomaly_positions = np.random.choice(n, num_anomalies, replace=False)
-    for pos in anomaly_positions:
+    for pos in np.random.choice(n, int(n * anomaly_rate), replace=False):
         signal[pos] += np.random.choice([-1, 1]) * np.random.uniform(1.5, 2.5)
 
     return JSONResponse({
-        "signal": signal.tolist(),
-        "time": t.tolist(),
-        "sampling_rate": sampling_rate,
+        "signal":   signal.tolist(),
+        "time":     t.tolist(),
         "duration": duration,
-        "injected_anomaly_count": num_anomalies,
+        "sampling_rate": sampling_rate,
     })

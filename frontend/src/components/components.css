@@ -387,3 +387,87 @@
   flex-direction: column;
   min-height: 100vh;
 }
+
+/* ── Model Info Card (Settings Panel) ── */
+.model-info-card {
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-left: 2px solid var(--accent);
+  border-radius: var(--radius);
+  padding: 14px 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.model-info-section-label {
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  color: var(--accent);
+  margin-bottom: 2px;
+}
+
+.model-info-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.model-info-row {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+  padding-bottom: 8px;
+  border-bottom: 1px solid var(--border);
+}
+
+.model-info-row:last-child {
+  border-bottom: none;
+  padding-bottom: 0;
+}
+
+.model-info-key {
+  font-size: 12px;
+  color: var(--muted);
+  flex-shrink: 0;
+  font-style: normal;
+}
+
+.model-info-val {
+  font-size: 11px;
+  font-family: var(--font-mono);
+  color: var(--text);
+  text-align: right;
+  word-break: break-all;
+}
+
+/* ── Threshold Display ── */
+.threshold-display-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.threshold-label {
+  font-size: 13px;
+  color: var(--muted);
+  font-weight: 500;
+}
+
+.threshold-value {
+  font-family: var(--font-mono);
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--accent);
+  letter-spacing: 0.03em;
+}
+
+.threshold-desc {
+  font-size: 11px;
+  color: var(--faint);
+  line-height: 1.6;
+}
